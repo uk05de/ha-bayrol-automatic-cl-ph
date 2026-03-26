@@ -181,9 +181,10 @@ class BayrolBridge:
         if self._discovery_sent:
             return
 
+        device_id_clean = self.device_id.lower().replace("-", "_")
         device_info = {
-            "identifiers": [self.device_id],
-            "name": "Bayrol Automatic CL/PH",
+            "identifiers": [f"bayrol_cl_ph_{device_id_clean}"],
+            "name": f"Bayrol Automatic CL/PH ({self.device_id})",
             "manufacturer": "Bayrol",
             "model": "Automatic CL/PH",
         }
