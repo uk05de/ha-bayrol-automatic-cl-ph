@@ -1,0 +1,32 @@
+name: "Bayrol Automatic CL/PH"
+description: "Bayrol PoolAccess CL/PH dosing system integration via MQTT Discovery"
+version: "0.1.0"
+slug: "bayrol_cl_ph"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+url: "https://github.com/uk05de/ha-bayrol-automatic-cl-ph"
+startup: services
+init: false
+options:
+  bayrol_username: ""
+  bayrol_password: ""
+  device_id: "23ACL2-04714"
+  refresh_interval: 900
+  mqtt_host: "192.168.2.158"
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  loglevel: "INFO"
+schema:
+  bayrol_username: str
+  bayrol_password: str
+  device_id: str
+  refresh_interval: int
+  mqtt_host: str
+  mqtt_port: int
+  mqtt_user: str
+  mqtt_password: str
+  loglevel: list(INFO|DEBUG|ERROR)
