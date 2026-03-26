@@ -17,6 +17,7 @@ from sensors import (
     SENSORS, BINARY_SENSORS,
     transform_value, evaluate_binary,
 )
+from canister_tracker import CanisterTracker
 
 log = logging.getLogger("bayrol")
 
@@ -76,8 +77,26 @@ class BayrolBridge:
             )
 
         self._local.on_connect = self._on_local_connect
+        self._local.on_message = self._on_local_message
         self._local_host = config["mqtt_host"]
         self._local_port = config["mqtt_port"]
+
+        # --- Canister tracker ---
+        self.canister = CanisterTracker(config)
+
+        # Map sensor unique_ids to canister tracker keys
+        self._canister_value_map = {
+            "ph_pump_capacity": "ph_pump_capacity",
+            "ph_prod_rate": "ph_prod_rate",
+            "ph_dosing_rate": "ph_dosing_rate",
+            "chlor_pump_capacity": "cl_pump_capacity",
+            "cl_prod_rate": "cl_prod_rate",
+            "chlor_dosing_rate": "cl_dosing_rate",
+        }
+        self._canister_binary_map = {
+            "ph_pump_state": "ph_pump_state",
+            "chlor_pump_state": "cl_pump_state",
+        }
 
     # --- Connection ---
 
@@ -148,12 +167,20 @@ class BayrolBridge:
             state_topic = f"{TOPIC_PREFIX}/sensor/{sensor['unique_id']}/state"
             self._local.publish(state_topic, str(value), retain=True)
             log.debug("Published %s = %s", sensor["name"], value)
+            # Feed canister tracker
+            ct_key = self._canister_value_map.get(sensor["unique_id"])
+            if ct_key:
+                self.canister.update_value(ct_key, value)
 
         elif component == "binary_sensor":
             is_on = evaluate_binary(sensor, raw_value)
             state_topic = f"{TOPIC_PREFIX}/binary_sensor/{sensor['unique_id']}/state"
             self._local.publish(state_topic, "ON" if is_on else "OFF", retain=True)
             log.debug("Published %s = %s", sensor["name"], "ON" if is_on else "OFF")
+            # Feed canister tracker
+            ct_key = self._canister_binary_map.get(sensor["unique_id"])
+            if ct_key:
+                self.canister.update_value(ct_key, is_on)
 
         # Update availability
         self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
@@ -169,10 +196,27 @@ class BayrolBridge:
     def _on_local_connect(self, client, userdata, flags, rc):
         if rc == 0:
             log.info("Local MQTT broker connected")
+            # Subscribe to canister reset buttons
+            client.subscribe(f"{TOPIC_PREFIX}/button/reset_ph/set")
+            client.subscribe(f"{TOPIC_PREFIX}/button/reset_cl/set")
             self._discovery_sent = False
             self.send_discovery()
         else:
             log.error("Local MQTT connection failed with code %d", rc)
+
+    def _on_local_message(self, client, userdata, msg):
+        """Handle reset button presses from HA."""
+        topic = msg.topic
+        payload = msg.payload.decode("utf-8")
+        log.debug("Local MQTT: %s = %s", topic, payload)
+
+        if topic == f"{TOPIC_PREFIX}/button/reset_ph/set" and payload == "PRESS":
+            self.canister.reset_ph()
+            self.publish_canister_state()
+
+        elif topic == f"{TOPIC_PREFIX}/button/reset_cl/set" and payload == "PRESS":
+            self.canister.reset_cl()
+            self.publish_canister_state()
 
     # --- Discovery ---
 
@@ -233,11 +277,84 @@ class BayrolBridge:
             topic = f"{DISCOVERY_PREFIX}/binary_sensor/bayrol/{sensor['unique_id']}/config"
             self._local.publish(topic, json.dumps(config), qos=1, retain=True)
 
+        # --- Canister level sensors ---
+        for ctype, name in [("ph", "pH-"), ("cl", "Chlor")]:
+            # Remaining percent
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_canister_level/config",
+                json.dumps({
+                    "name": f"{name} Kanister Füllstand",
+                    "unique_id": f"bayrol_{ctype}_canister_level",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/{ctype}_canister_level/state",
+                    "unit_of_measurement": "%",
+                    "icon": "mdi:gauge",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Consumed liters
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_canister_consumed/config",
+                json.dumps({
+                    "name": f"{name} Kanister Verbrauch",
+                    "unique_id": f"bayrol_{ctype}_canister_consumed",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/{ctype}_canister_consumed/state",
+                    "unit_of_measurement": "L",
+                    "icon": "mdi:water-minus",
+                    "state_class": "total_increasing",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Reset button
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/button/bayrol/reset_{ctype}/config",
+                json.dumps({
+                    "name": f"{name} Kanister Reset",
+                    "unique_id": f"bayrol_reset_{ctype}_canister",
+                    "command_topic": f"{TOPIC_PREFIX}/button/reset_{ctype}/set",
+                    "payload_press": "PRESS",
+                    "icon": "mdi:reload",
+                    "entity_category": "config",
+                    "device": device_info,
+                }), qos=1, retain=True
+            )
+
         self._discovery_sent = True
         # Publish initial availability so entities appear in HA
         self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
-        log.info("MQTT Discovery published (%d sensors, %d binary sensors)",
+        # Publish initial canister state
+        self.publish_canister_state()
+        log.info("MQTT Discovery published (%d sensors, %d binary sensors, 4 canister sensors, 2 reset buttons)",
                  len(SENSORS), len(BINARY_SENSORS))
+
+    # --- Canister ---
+
+    def publish_canister_state(self):
+        """Publish canister levels to MQTT."""
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/ph_canister_level/state",
+            str(self.canister.ph_remaining_percent), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/cl_canister_level/state",
+            str(self.canister.cl_remaining_percent), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/ph_canister_consumed/state",
+            str(self.canister.ph_consumed_liters), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/cl_canister_consumed/state",
+            str(self.canister.cl_consumed_liters), retain=True)
+
+    def update_canister(self):
+        """Calculate consumption, publish state, check alerts. Call periodically."""
+        self.canister.calculate()
+        self.publish_canister_state()
+        self.canister.save_state()
+        return self.canister.check_alerts()
 
     # --- Refresh ---
 

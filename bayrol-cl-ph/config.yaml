@@ -1,6 +1,6 @@
 name: "Bayrol Automatic CL/PH"
 description: "Bayrol PoolAccess CL/PH dosing system integration via MQTT Discovery"
-version: "0.3.0"
+version: "0.4.0"
 slug: "bayrol_cl_ph"
 arch:
   - aarch64
@@ -10,6 +10,7 @@ arch:
 url: "https://github.com/uk05de/ha-bayrol-automatic-cl-ph"
 startup: services
 init: false
+homeassistant_api: true
 options:
   bayrol_username: ""
   bayrol_password: ""
@@ -19,6 +20,10 @@ options:
   mqtt_port: 1883
   mqtt_user: ""
   mqtt_password: ""
+  canister_size_cl: 25
+  canister_size_ph: 25
+  alert_threshold: 20
+  notification_target: ""
   loglevel: "INFO"
 schema:
   bayrol_username: str
@@ -29,4 +34,8 @@ schema:
   mqtt_port: int
   mqtt_user: str
   mqtt_password: str
+  canister_size_cl: float
+  canister_size_ph: float
+  alert_threshold: int
+  notification_target: str
   loglevel: list(INFO|DEBUG|ERROR)
