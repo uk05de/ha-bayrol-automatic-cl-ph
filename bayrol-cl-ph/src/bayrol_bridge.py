@@ -138,23 +138,37 @@ class BayrolBridge:
         payload = msg.payload.decode("utf-8")
         log.debug("Bayrol: %s = %s", topic, payload)
 
-        # Extract register from topic: d02/DEVICE_ID/v/X.Y -> X.Y
+        # Only process /v/ topics (value messages)
         parts = topic.split("/")
         if len(parts) < 4 or parts[2] != "v":
             return
 
-        register = parts[3]
-
         # Parse payload
         try:
             data = json.loads(payload)
-            raw_value = data.get("v")
-            if raw_value is None:
-                return
         except (json.JSONDecodeError, TypeError):
             return
 
-        # Route to sensor
+        # Handle both formats:
+        # 1. Batch array: [{"t":"4.2","v":71}, {"t":"4.3","v":76}, ...]
+        # 2. Single object: {"v": 71}
+        if isinstance(data, list):
+            for item in data:
+                register = str(item.get("t", ""))
+                raw_value = item.get("v")
+                if register and raw_value is not None:
+                    self._process_register(register, raw_value)
+        elif isinstance(data, dict):
+            register = parts[3]
+            raw_value = data.get("v")
+            if raw_value is not None:
+                self._process_register(register, raw_value)
+
+        # Update availability
+        self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
+
+    def _process_register(self, register: str, raw_value):
+        """Process a single register value."""
         entry = self._sensor_by_register.get(register)
         if entry is None:
             log.debug("Unknown register %s, ignoring", register)
@@ -181,9 +195,6 @@ class BayrolBridge:
             ct_key = self._canister_binary_map.get(sensor["unique_id"])
             if ct_key:
                 self.canister.update_value(ct_key, is_on)
-
-        # Update availability
-        self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
 
     def _on_bayrol_disconnect(self, client, userdata, rc, properties=None):
         if rc != 0:
