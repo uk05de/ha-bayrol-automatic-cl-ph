@@ -4,16 +4,24 @@
 #
 # Tracks consumption of pH- and Chlorine canisters based on
 # pump capacity, production rate, and dosing rate.
+# Persists consumed amounts in HA input_number helpers.
 #
 
 import json
 import logging
 import os
 import time
+import urllib.request
 
 log = logging.getLogger("bayrol.canister")
 
-STATE_FILE = "/data/canister_state.json"
+SUPERVISOR_API = "http://supervisor/core/api"
+
+# HA helper entity IDs
+ENTITY_CONSUMED_PH = "input_number.bayrol_consumed_ph_ml"
+ENTITY_CONSUMED_CL = "input_number.bayrol_consumed_cl_ml"
+ENTITY_ALERT_PH = "input_boolean.bayrol_ph_alert_sent"
+ENTITY_ALERT_CL = "input_boolean.bayrol_cl_alert_sent"
 
 
 class CanisterTracker:
@@ -23,6 +31,7 @@ class CanisterTracker:
         self.canister_size_cl = config.get("canister_size_cl", 25.0)  # liters
         self.canister_size_ph = config.get("canister_size_ph", 25.0)  # liters
         self.alert_threshold = config.get("alert_threshold", 20)  # percent remaining
+        self._token = os.environ.get("SUPERVISOR_TOKEN", "")
 
         # Current sensor values (updated from bridge)
         self._values = {
@@ -45,39 +54,134 @@ class CanisterTracker:
         self._ph_alert_sent = False
         self._cl_alert_sent = False
 
-        # Load persisted state
-        self._load_state()
+        # HA state initialized
+        self._ha_initialized = False
 
-    # --- State persistence ---
+    # --- HA API helpers ---
 
-    def _load_state(self):
-        """Load consumed amounts from persistent storage."""
-        if os.path.exists(STATE_FILE):
+    def _ha_api(self, method: str, path: str, data: dict = None):
+        """Call Home Assistant API via Supervisor."""
+        if not self._token:
+            log.warning("No SUPERVISOR_TOKEN available")
+            return None
+
+        url = f"{SUPERVISOR_API}{path}"
+        body = json.dumps(data).encode("utf-8") if data else None
+
+        req = urllib.request.Request(
+            url, data=body, method=method,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+                return None
+        except Exception as e:
+            log.debug("HA API %s %s failed: %s", method, path, e)
+            return None
+
+    def _get_ha_state(self, entity_id: str, default=None):
+        """Get current state of an HA entity."""
+        result = self._ha_api("GET", f"/states/{entity_id}")
+        if result and result.get("state") not in (None, "unknown", "unavailable"):
             try:
-                with open(STATE_FILE) as f:
-                    state = json.load(f)
-                self._consumed_cl_ml = state.get("consumed_cl_ml", 0.0)
-                self._consumed_ph_ml = state.get("consumed_ph_ml", 0.0)
-                self._ph_alert_sent = state.get("ph_alert_sent", False)
-                self._cl_alert_sent = state.get("cl_alert_sent", False)
-                log.info("Loaded canister state: CL %.0f ml, pH %.0f ml consumed",
-                         self._consumed_cl_ml, self._consumed_ph_ml)
-            except (json.JSONDecodeError, IOError) as e:
-                log.warning("Failed to load canister state: %s", e)
+                return float(result["state"])
+            except (ValueError, TypeError):
+                if result["state"] in ("on", "off"):
+                    return result["state"] == "on"
+        return default
+
+    def _set_ha_state(self, entity_id: str, value):
+        """Set state of an HA entity via service call."""
+        if entity_id.startswith("input_number"):
+            self._ha_api("POST", "/services/input_number/set_value", {
+                "entity_id": entity_id,
+                "value": value,
+            })
+        elif entity_id.startswith("input_boolean"):
+            service = "turn_on" if value else "turn_off"
+            self._ha_api("POST", f"/services/input_boolean/{service}", {
+                "entity_id": entity_id,
+            })
+
+    def _create_helper(self, entity_id: str, name: str, helper_type: str, **kwargs):
+        """Create an HA helper if it doesn't exist."""
+        result = self._ha_api("GET", f"/states/{entity_id}")
+        if result and result.get("state") != "unavailable":
+            log.debug("Helper %s already exists", entity_id)
+            return
+
+        if helper_type == "input_number":
+            self._ha_api("POST", "/services/input_number/create", {
+                "name": name,
+                "min": kwargs.get("min", 0),
+                "max": kwargs.get("max", 100000),
+                "step": kwargs.get("step", 0.01),
+                "unit_of_measurement": kwargs.get("unit", "ml"),
+                "mode": "box",
+                "icon": kwargs.get("icon", "mdi:counter"),
+            })
+        elif helper_type == "input_boolean":
+            self._ha_api("POST", "/services/input_boolean/create", {
+                "name": name,
+                "icon": kwargs.get("icon", "mdi:alert"),
+            })
+
+        log.info("Created helper: %s", entity_id)
+
+    # --- Initialization ---
+
+    def init_ha_helpers(self):
+        """Create HA helpers and load persisted state."""
+        if not self._token:
+            log.warning("No SUPERVISOR_TOKEN, HA persistence disabled")
+            return
+
+        # Create helpers if they don't exist
+        self._create_helper(
+            ENTITY_CONSUMED_PH, "Bayrol pH Verbrauch (ml)",
+            "input_number", min=0, max=100000, step=0.01,
+            unit="ml", icon="mdi:water-minus",
+        )
+        self._create_helper(
+            ENTITY_CONSUMED_CL, "Bayrol Chlor Verbrauch (ml)",
+            "input_number", min=0, max=100000, step=0.01,
+            unit="ml", icon="mdi:water-minus",
+        )
+        self._create_helper(
+            ENTITY_ALERT_PH, "Bayrol pH Alert gesendet",
+            "input_boolean", icon="mdi:alert",
+        )
+        self._create_helper(
+            ENTITY_ALERT_CL, "Bayrol Chlor Alert gesendet",
+            "input_boolean", icon="mdi:alert",
+        )
+
+        # Wait for helpers to be available
+        time.sleep(2)
+
+        # Load current values from HA
+        self._consumed_ph_ml = self._get_ha_state(ENTITY_CONSUMED_PH, 0.0)
+        self._consumed_cl_ml = self._get_ha_state(ENTITY_CONSUMED_CL, 0.0)
+        self._ph_alert_sent = self._get_ha_state(ENTITY_ALERT_PH, False)
+        self._cl_alert_sent = self._get_ha_state(ENTITY_ALERT_CL, False)
+        self._ha_initialized = True
+
+        log.info("Loaded canister state from HA: pH %.0f ml, CL %.0f ml consumed",
+                 self._consumed_ph_ml, self._consumed_cl_ml)
 
     def save_state(self):
-        """Persist consumed amounts to disk."""
-        state = {
-            "consumed_cl_ml": round(self._consumed_cl_ml, 2),
-            "consumed_ph_ml": round(self._consumed_ph_ml, 2),
-            "ph_alert_sent": self._ph_alert_sent,
-            "cl_alert_sent": self._cl_alert_sent,
-        }
-        try:
-            with open(STATE_FILE, "w") as f:
-                json.dump(state, f)
-        except IOError as e:
-            log.error("Failed to save canister state: %s", e)
+        """Persist consumed amounts to HA helpers."""
+        if not self._ha_initialized:
+            return
+        self._set_ha_state(ENTITY_CONSUMED_PH, round(self._consumed_ph_ml, 2))
+        self._set_ha_state(ENTITY_CONSUMED_CL, round(self._consumed_cl_ml, 2))
+        self._set_ha_state(ENTITY_ALERT_PH, self._ph_alert_sent)
+        self._set_ha_state(ENTITY_ALERT_CL, self._cl_alert_sent)
 
     # --- Sensor value updates ---
 
@@ -95,7 +199,6 @@ class CanisterTracker:
         self._last_calc_time = now
 
         if elapsed_s <= 0 or elapsed_s > 3600:
-            # Skip unreasonable intervals (first call or long gap)
             return
 
         # pH consumption
