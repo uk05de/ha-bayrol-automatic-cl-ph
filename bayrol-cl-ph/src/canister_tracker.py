@@ -178,6 +178,23 @@ class CanisterTracker:
 
     # --- Reset ---
 
+    def set_ph_remaining(self, liters: float):
+        """Manually set pH canister remaining volume."""
+        self._consumed_ph_ml = (self.canister_size_ph * 1000) - (liters * 1000)
+        self._consumed_ph_ml = max(0.0, self._consumed_ph_ml)
+        # Reset alert if level was corrected above threshold
+        if self.ph_remaining_percent > self.alert_threshold:
+            self._ph_alert_sent = False
+        self.save_state()
+
+    def set_cl_remaining(self, liters: float):
+        """Manually set chlorine canister remaining volume."""
+        self._consumed_cl_ml = (self.canister_size_cl * 1000) - (liters * 1000)
+        self._consumed_cl_ml = max(0.0, self._consumed_cl_ml)
+        if self.cl_remaining_percent > self.alert_threshold:
+            self._cl_alert_sent = False
+        self.save_state()
+
     def reset_ph(self):
         """Reset pH canister to full (new canister installed)."""
         log.info("pH canister reset to full (%dL)", self.canister_size_ph)

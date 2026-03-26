@@ -196,9 +196,11 @@ class BayrolBridge:
     def _on_local_connect(self, client, userdata, flags, rc):
         if rc == 0:
             log.info("Local MQTT broker connected")
-            # Subscribe to canister reset buttons
+            # Subscribe to canister commands
             client.subscribe(f"{TOPIC_PREFIX}/button/reset_ph/set")
             client.subscribe(f"{TOPIC_PREFIX}/button/reset_cl/set")
+            client.subscribe(f"{TOPIC_PREFIX}/number/ph_canister_remaining/set")
+            client.subscribe(f"{TOPIC_PREFIX}/number/cl_canister_remaining/set")
             self._discovery_sent = False
             self.send_discovery()
         else:
@@ -217,6 +219,24 @@ class BayrolBridge:
         elif topic == f"{TOPIC_PREFIX}/button/reset_cl/set" and payload == "PRESS":
             self.canister.reset_cl()
             self.publish_canister_state()
+
+        elif topic == f"{TOPIC_PREFIX}/number/ph_canister_remaining/set":
+            try:
+                liters = float(payload)
+                self.canister.set_ph_remaining(liters)
+                self.publish_canister_state()
+                log.info("pH canister manually set to %.1f L", liters)
+            except ValueError:
+                log.warning("Invalid pH canister value: %s", payload)
+
+        elif topic == f"{TOPIC_PREFIX}/number/cl_canister_remaining/set":
+            try:
+                liters = float(payload)
+                self.canister.set_cl_remaining(liters)
+                self.publish_canister_state()
+                log.info("CL canister manually set to %.1f L", liters)
+            except ValueError:
+                log.warning("Invalid CL canister value: %s", payload)
 
     # --- Discovery ---
 
@@ -277,9 +297,32 @@ class BayrolBridge:
             topic = f"{DISCOVERY_PREFIX}/binary_sensor/bayrol/{sensor['unique_id']}/config"
             self._local.publish(topic, json.dumps(config), qos=1, retain=True)
 
-        # --- Canister level sensors ---
+        # --- Canister entities ---
+        canister_sizes = {"ph": self.canister.canister_size_ph,
+                          "cl": self.canister.canister_size_cl}
         for ctype, name in [("ph", "pH-"), ("cl", "Chlor")]:
-            # Remaining percent
+            size = canister_sizes[ctype]
+            # Remaining liters (editable number entity)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/number/bayrol/{ctype}_canister_remaining/config",
+                json.dumps({
+                    "name": f"{name} Kanister Restmenge",
+                    "unique_id": f"bayrol_{ctype}_canister_remaining",
+                    "state_topic": f"{TOPIC_PREFIX}/number/{ctype}_canister_remaining/state",
+                    "command_topic": f"{TOPIC_PREFIX}/number/{ctype}_canister_remaining/set",
+                    "min": 0,
+                    "max": size,
+                    "step": 0.1,
+                    "unit_of_measurement": "L",
+                    "icon": "mdi:gauge",
+                    "mode": "box",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Remaining percent (read-only sensor)
             self._local.publish(
                 f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_canister_level/config",
                 json.dumps({
@@ -294,7 +337,7 @@ class BayrolBridge:
                     "payload_not_available": "offline",
                 }), qos=1, retain=True
             )
-            # Consumed liters
+            # Consumed liters (read-only sensor)
             self._local.publish(
                 f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_canister_consumed/config",
                 json.dumps({
@@ -336,12 +379,21 @@ class BayrolBridge:
 
     def publish_canister_state(self):
         """Publish canister levels to MQTT."""
+        # Editable remaining liters
+        self._local.publish(
+            f"{TOPIC_PREFIX}/number/ph_canister_remaining/state",
+            str(round(self.canister.ph_remaining_ml / 1000, 1)), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/number/cl_canister_remaining/state",
+            str(round(self.canister.cl_remaining_ml / 1000, 1)), retain=True)
+        # Read-only percent
         self._local.publish(
             f"{TOPIC_PREFIX}/sensor/ph_canister_level/state",
             str(self.canister.ph_remaining_percent), retain=True)
         self._local.publish(
             f"{TOPIC_PREFIX}/sensor/cl_canister_level/state",
             str(self.canister.cl_remaining_percent), retain=True)
+        # Read-only consumed
         self._local.publish(
             f"{TOPIC_PREFIX}/sensor/ph_canister_consumed/state",
             str(self.canister.ph_consumed_liters), retain=True)
