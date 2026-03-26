@@ -89,9 +89,6 @@ def main():
 
     bridge.connect()
 
-    # Initialize HA helpers for canister tracking
-    bridge.canister.init_ha_helpers()
-
     try:
         while running:
             bridge.check_refresh()
