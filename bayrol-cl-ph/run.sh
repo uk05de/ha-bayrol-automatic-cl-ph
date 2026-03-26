@@ -11,7 +11,7 @@ fi
 echo "============================================"
 echo "  Bayrol Automatic CL/PH Addon"
 echo "============================================"
-cat "$OPTIONS_FILE" | python3 -c "import sys,json; d=json.load(sys.stdin); d['bayrol_password']='***'; print(json.dumps(d,indent=2))"
+cat "$OPTIONS_FILE" | python3 -c "import sys,json; d=json.load(sys.stdin); d['bayrol_password']='***'; d['mqtt_password']='***'; print(json.dumps(d,indent=2))"
 echo ""
 echo "============================================"
 

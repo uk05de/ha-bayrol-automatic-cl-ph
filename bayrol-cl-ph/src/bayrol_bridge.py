@@ -34,7 +34,7 @@ class BayrolBridge:
     def __init__(self, config: dict):
         self.device_id = config["device_id"]
         self.refresh_interval = config.get("refresh_interval", 900)
-        self._last_refresh = 0
+        self._last_refresh = time.monotonic()  # prevent double refresh on startup
         self._discovery_sent = False
 
         # Build register lookup for fast message routing
@@ -234,6 +234,8 @@ class BayrolBridge:
             self._local.publish(topic, json.dumps(config), qos=1, retain=True)
 
         self._discovery_sent = True
+        # Publish initial availability so entities appear in HA
+        self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
         log.info("MQTT Discovery published (%d sensors, %d binary sensors)",
                  len(SENSORS), len(BINARY_SENSORS))
 
