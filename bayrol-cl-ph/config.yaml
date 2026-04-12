@@ -1,6 +1,6 @@
 name: "Bayrol Automatic CL/PH"
 description: "Bayrol PoolAccess CL/PH dosing system integration via MQTT Discovery"
-version: "0.10.0"
+version: "0.11.0"
 slug: "bayrol_cl_ph"
 arch:
   - aarch64
@@ -24,6 +24,7 @@ options:
   canister_size_ph: 25
   alert_threshold: 20
   notification_target: ""
+  shelly_topic_prefix: ""
   loglevel: "INFO"
 schema:
   bayrol_username: str
@@ -38,4 +39,5 @@ schema:
   canister_size_ph: float
   alert_threshold: int
   notification_target: str
+  shelly_topic_prefix: str
   loglevel: list(INFO|DEBUG|ERROR)

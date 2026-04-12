@@ -39,6 +39,10 @@ class BayrolBridge:
         self._last_refresh = time.monotonic()  # prevent double refresh on startup
         self._discovery_sent = False
 
+        # --- Shelly integration (optional) ---
+        self._shelly_prefix = config.get("shelly_topic_prefix", "").strip()
+        self._shelly_rpc_id = 0
+
         # Build register lookup for fast message routing
         self._sensor_by_register = {}
         for s in SENSORS:
@@ -252,6 +256,11 @@ class BayrolBridge:
                 client.subscribe(f"{TOPIC_PREFIX}/number/{s['unique_id']}/set")
             for s in WRITABLE_SELECTS:
                 client.subscribe(f"{TOPIC_PREFIX}/select/{s['unique_id']}/set")
+            # Subscribe to Shelly status (if configured)
+            if self._shelly_prefix:
+                client.subscribe(f"{self._shelly_prefix}/status/switch:0")
+                client.subscribe(f"{TOPIC_PREFIX}/switch/power/set")
+                log.info("Shelly integration enabled: %s", self._shelly_prefix)
             self._discovery_sent = False
             self.send_discovery()
         else:
@@ -326,6 +335,74 @@ class BayrolBridge:
             else:
                 log.warning("Invalid option for %s: %s", select_sensor["name"], payload)
             return
+
+        # --- Shelly integration ---
+        if self._shelly_prefix:
+            # Shelly status update (switch:0)
+            if topic == f"{self._shelly_prefix}/status/switch:0":
+                self._handle_shelly_status(payload)
+                return
+
+            # Switch command from HA
+            if topic == f"{TOPIC_PREFIX}/switch/power/set":
+                self._handle_shelly_command(payload)
+                return
+
+    # --- Shelly integration ---
+
+    def _handle_shelly_status(self, payload):
+        """Handle Shelly Plus 1 PM status update (Gen2 JSON format)."""
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        # Switch state
+        output = data.get("output")
+        if output is not None:
+            state = "ON" if output else "OFF"
+            self._local.publish(
+                f"{TOPIC_PREFIX}/switch/power/state", state, retain=True)
+
+        # Power measurement
+        apower = data.get("apower")
+        if apower is not None:
+            self._local.publish(
+                f"{TOPIC_PREFIX}/sensor/power/state",
+                str(round(apower, 1)), retain=True)
+
+        # Voltage
+        voltage = data.get("voltage")
+        if voltage is not None:
+            self._local.publish(
+                f"{TOPIC_PREFIX}/sensor/voltage/state",
+                str(round(voltage, 1)), retain=True)
+
+        # Current
+        current = data.get("current")
+        if current is not None:
+            self._local.publish(
+                f"{TOPIC_PREFIX}/sensor/current/state",
+                str(round(current, 3)), retain=True)
+
+        log.debug("Shelly status: output=%s, power=%s W", output, apower)
+
+    def _handle_shelly_command(self, payload):
+        """Forward switch command to Shelly via MQTT RPC."""
+        turn_on = payload.upper() == "ON"
+        self._shelly_rpc_id += 1
+        rpc_payload = json.dumps({
+            "id": self._shelly_rpc_id,
+            "src": "bayrol_cl_ph",
+            "method": "Switch.Set",
+            "params": {"id": 0, "on": turn_on},
+        })
+        self._local.publish(f"{self._shelly_prefix}/rpc", rpc_payload)
+        # Optimistic state update
+        self._local.publish(
+            f"{TOPIC_PREFIX}/switch/power/state",
+            "ON" if turn_on else "OFF", retain=True)
+        log.info("Shelly switch: %s", "ON" if turn_on else "OFF")
 
     # --- Write to Bayrol ---
 
@@ -447,6 +524,78 @@ class BayrolBridge:
             self._local.publish(
                 f"{DISCOVERY_PREFIX}/sensor/bayrol/{sensor['unique_id']}/config",
                 "", qos=1, retain=True)
+
+        # --- Shelly power entities (if configured) ---
+        if self._shelly_prefix:
+            # Switch: Dosieranlage Ein/Aus
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/switch/bayrol/power/config",
+                json.dumps({
+                    "name": "Dosieranlage",
+                    "unique_id": "bayrol_power_switch",
+                    "state_topic": f"{TOPIC_PREFIX}/switch/power/state",
+                    "command_topic": f"{TOPIC_PREFIX}/switch/power/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "icon": "mdi:power",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Sensor: Leistung (W)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/power/config",
+                json.dumps({
+                    "name": "Leistung",
+                    "unique_id": "bayrol_power",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/power/state",
+                    "unit_of_measurement": "W",
+                    "device_class": "power",
+                    "state_class": "measurement",
+                    "icon": "mdi:flash",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Sensor: Spannung (V)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/voltage/config",
+                json.dumps({
+                    "name": "Spannung",
+                    "unique_id": "bayrol_voltage",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/voltage/state",
+                    "unit_of_measurement": "V",
+                    "device_class": "voltage",
+                    "state_class": "measurement",
+                    "entity_category": "diagnostic",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Sensor: Strom (A)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/current/config",
+                json.dumps({
+                    "name": "Strom",
+                    "unique_id": "bayrol_current",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/current/state",
+                    "unit_of_measurement": "A",
+                    "device_class": "current",
+                    "state_class": "measurement",
+                    "entity_category": "diagnostic",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            log.info("Shelly power entities published (switch + 3 sensors)")
 
         # --- Canister entities ---
         canister_sizes = {"ph": self.canister.canister_size_ph,
