@@ -15,7 +15,8 @@ import paho.mqtt.client as mqtt
 
 from sensors import (
     SENSORS, BINARY_SENSORS,
-    transform_value, evaluate_binary,
+    WRITABLE_NUMBERS, WRITABLE_SELECTS,
+    transform_value, transform_select, evaluate_binary,
 )
 from canister_tracker import CanisterTracker
 
@@ -44,6 +45,18 @@ class BayrolBridge:
             self._sensor_by_register[s["register"]] = ("sensor", s)
         for s in BINARY_SENSORS:
             self._sensor_by_register[s["register"]] = ("binary_sensor", s)
+        for s in WRITABLE_NUMBERS:
+            self._sensor_by_register[s["register"]] = ("number", s)
+        for s in WRITABLE_SELECTS:
+            self._sensor_by_register[s["register"]] = ("select", s)
+
+        # Build command topic lookups for writable entities
+        self._number_cmd_topics = {}
+        for s in WRITABLE_NUMBERS:
+            self._number_cmd_topics[f"{TOPIC_PREFIX}/number/{s['unique_id']}/set"] = s
+        self._select_cmd_topics = {}
+        for s in WRITABLE_SELECTS:
+            self._select_cmd_topics[f"{TOPIC_PREFIX}/select/{s['unique_id']}/set"] = s
 
         # --- Bayrol Cloud MQTT client (WSS) ---
         self._bayrol = mqtt.Client(
@@ -186,6 +199,28 @@ class BayrolBridge:
             if ct_key:
                 self.canister.update_value(ct_key, value)
 
+        elif component == "number":
+            value = transform_value(sensor, raw_value)
+            state_topic = f"{TOPIC_PREFIX}/number/{sensor['unique_id']}/state"
+            self._local.publish(state_topic, str(value), retain=True)
+            log.debug("Published %s = %s", sensor["name"], value)
+
+        elif component == "select":
+            display_value = transform_select(sensor, raw_value)
+            if display_value:
+                state_topic = f"{TOPIC_PREFIX}/select/{sensor['unique_id']}/state"
+                self._local.publish(state_topic, display_value, retain=True)
+                log.debug("Published %s = %s", sensor["name"], display_value)
+                # Feed canister tracker with numeric value (production rates)
+                ct_key = self._canister_value_map.get(sensor["unique_id"])
+                if ct_key:
+                    try:
+                        self.canister.update_value(ct_key, int(display_value))
+                    except ValueError:
+                        pass
+            else:
+                log.warning("Unknown select code for %s: %s", sensor["name"], raw_value)
+
         elif component == "binary_sensor":
             is_on = evaluate_binary(sensor, raw_value)
             state_topic = f"{TOPIC_PREFIX}/binary_sensor/{sensor['unique_id']}/state"
@@ -212,13 +247,18 @@ class BayrolBridge:
             client.subscribe(f"{TOPIC_PREFIX}/button/reset_cl/set")
             client.subscribe(f"{TOPIC_PREFIX}/number/ph_canister_remaining/set")
             client.subscribe(f"{TOPIC_PREFIX}/number/cl_canister_remaining/set")
+            # Subscribe to writable entity commands
+            for s in WRITABLE_NUMBERS:
+                client.subscribe(f"{TOPIC_PREFIX}/number/{s['unique_id']}/set")
+            for s in WRITABLE_SELECTS:
+                client.subscribe(f"{TOPIC_PREFIX}/select/{s['unique_id']}/set")
             self._discovery_sent = False
             self.send_discovery()
         else:
             log.error("Local MQTT connection failed with code %d", rc)
 
     def _on_local_message(self, client, userdata, msg):
-        """Handle reset button presses from HA."""
+        """Handle commands from HA (buttons, numbers, selects)."""
         topic = msg.topic
         payload = msg.payload.decode("utf-8")
         log.debug("Local MQTT: %s = %s", topic, payload)
@@ -226,12 +266,14 @@ class BayrolBridge:
         if topic == f"{TOPIC_PREFIX}/button/reset_ph/set" and payload == "PRESS":
             self.canister.reset_ph()
             self.publish_canister_state()
+            return
 
-        elif topic == f"{TOPIC_PREFIX}/button/reset_cl/set" and payload == "PRESS":
+        if topic == f"{TOPIC_PREFIX}/button/reset_cl/set" and payload == "PRESS":
             self.canister.reset_cl()
             self.publish_canister_state()
+            return
 
-        elif topic == f"{TOPIC_PREFIX}/number/ph_canister_remaining/set":
+        if topic == f"{TOPIC_PREFIX}/number/ph_canister_remaining/set":
             try:
                 liters = float(payload)
                 self.canister.set_ph_remaining(liters)
@@ -239,8 +281,9 @@ class BayrolBridge:
                 log.info("pH canister manually set to %.1f L", liters)
             except ValueError:
                 log.warning("Invalid pH canister value: %s", payload)
+            return
 
-        elif topic == f"{TOPIC_PREFIX}/number/cl_canister_remaining/set":
+        if topic == f"{TOPIC_PREFIX}/number/cl_canister_remaining/set":
             try:
                 liters = float(payload)
                 self.canister.set_cl_remaining(liters)
@@ -248,6 +291,50 @@ class BayrolBridge:
                 log.info("CL canister manually set to %.1f L", liters)
             except ValueError:
                 log.warning("Invalid CL canister value: %s", payload)
+            return
+
+        # Writable number entities (pH/Redox targets and alerts)
+        number_sensor = self._number_cmd_topics.get(topic)
+        if number_sensor:
+            try:
+                display_value = float(payload)
+                mqtt_value = int(round(display_value * number_sensor["write_coefficient"]))
+                self._write_to_bayrol(number_sensor["register"], mqtt_value)
+                state_topic = f"{TOPIC_PREFIX}/number/{number_sensor['unique_id']}/state"
+                self._local.publish(state_topic, str(display_value), retain=True)
+                log.info("Set %s = %s (MQTT value: %d)", number_sensor["name"], payload, mqtt_value)
+            except (ValueError, TypeError) as e:
+                log.warning("Invalid value for %s: %s (%s)", number_sensor["name"], payload, e)
+            return
+
+        # Writable select entities (production rates, filtration mode, out modes)
+        select_sensor = self._select_cmd_topics.get(topic)
+        if select_sensor:
+            mqtt_code = select_sensor["display_to_mqtt"].get(payload)
+            if mqtt_code:
+                self._write_to_bayrol(select_sensor["register"], mqtt_code)
+                state_topic = f"{TOPIC_PREFIX}/select/{select_sensor['unique_id']}/state"
+                self._local.publish(state_topic, payload, retain=True)
+                log.info("Set %s = %s (MQTT code: %s)", select_sensor["name"], payload, mqtt_code)
+                # Update canister tracker if applicable (production rates)
+                ct_key = self._canister_value_map.get(select_sensor["unique_id"])
+                if ct_key:
+                    try:
+                        self.canister.update_value(ct_key, int(payload))
+                    except ValueError:
+                        pass
+            else:
+                log.warning("Invalid option for %s: %s", select_sensor["name"], payload)
+            return
+
+    # --- Write to Bayrol ---
+
+    def _write_to_bayrol(self, register, value):
+        """Write a value to the Bayrol cloud via /s/ topic."""
+        topic = f"d02/{self.device_id}/s/{register}"
+        payload = json.dumps({"t": register, "v": value})
+        self._bayrol.publish(topic, payload, qos=1)
+        log.info("Published to Bayrol: %s = %s", topic, payload)
 
     # --- Discovery ---
 
@@ -307,6 +394,59 @@ class BayrolBridge:
 
             topic = f"{DISCOVERY_PREFIX}/binary_sensor/bayrol/{sensor['unique_id']}/config"
             self._local.publish(topic, json.dumps(config), qos=1, retain=True)
+
+        # --- Writable number entities ---
+        for sensor in WRITABLE_NUMBERS:
+            config = {
+                "name": sensor["name"],
+                "unique_id": f"bayrol_{sensor['unique_id']}",
+                "state_topic": f"{TOPIC_PREFIX}/number/{sensor['unique_id']}/state",
+                "command_topic": f"{TOPIC_PREFIX}/number/{sensor['unique_id']}/set",
+                "min": sensor["min"],
+                "max": sensor["max"],
+                "step": sensor["step"],
+                "mode": "box",
+                "device": device_info,
+                "availability_topic": f"{TOPIC_PREFIX}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }
+            if "unit" in sensor:
+                config["unit_of_measurement"] = sensor["unit"]
+            if "icon" in sensor:
+                config["icon"] = sensor["icon"]
+            if "entity_category" in sensor:
+                config["entity_category"] = sensor["entity_category"]
+
+            topic = f"{DISCOVERY_PREFIX}/number/bayrol/{sensor['unique_id']}/config"
+            self._local.publish(topic, json.dumps(config), qos=1, retain=True)
+            # Remove old sensor discovery (migration cleanup)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{sensor['unique_id']}/config",
+                "", qos=1, retain=True)
+
+        # --- Writable select entities ---
+        for sensor in WRITABLE_SELECTS:
+            config = {
+                "name": sensor["name"],
+                "unique_id": f"bayrol_{sensor['unique_id']}",
+                "state_topic": f"{TOPIC_PREFIX}/select/{sensor['unique_id']}/state",
+                "command_topic": f"{TOPIC_PREFIX}/select/{sensor['unique_id']}/set",
+                "options": sensor["options"],
+                "device": device_info,
+                "availability_topic": f"{TOPIC_PREFIX}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }
+            if "icon" in sensor:
+                config["icon"] = sensor["icon"]
+
+            topic = f"{DISCOVERY_PREFIX}/select/bayrol/{sensor['unique_id']}/config"
+            self._local.publish(topic, json.dumps(config), qos=1, retain=True)
+            # Remove old sensor discovery (migration cleanup)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{sensor['unique_id']}/config",
+                "", qos=1, retain=True)
 
         # --- Canister entities ---
         canister_sizes = {"ph": self.canister.canister_size_ph,
@@ -383,8 +523,8 @@ class BayrolBridge:
         self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
         # Publish initial canister state
         self.publish_canister_state()
-        log.info("MQTT Discovery published (%d sensors, %d binary sensors, 4 canister sensors, 2 reset buttons)",
-                 len(SENSORS), len(BINARY_SENSORS))
+        log.info("MQTT Discovery published (%d sensors, %d binary, %d numbers, %d selects, canister entities)",
+                 len(SENSORS), len(BINARY_SENSORS), len(WRITABLE_NUMBERS), len(WRITABLE_SELECTS))
 
     # --- Canister ---
 
@@ -425,7 +565,9 @@ class BayrolBridge:
         """Send empty messages to /g/ topics to trigger Bayrol data refresh."""
         log.info("Triggering data refresh from Bayrol cloud...")
         all_registers = [s["register"] for s in SENSORS] + \
-                        [s["register"] for s in BINARY_SENSORS]
+                        [s["register"] for s in BINARY_SENSORS] + \
+                        [s["register"] for s in WRITABLE_NUMBERS] + \
+                        [s["register"] for s in WRITABLE_SELECTS]
         for register in all_registers:
             topic = f"d02/{self.device_id}/g/{register}"
             self._bayrol.publish(topic, "", qos=0)

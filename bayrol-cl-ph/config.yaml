@@ -1,6 +1,6 @@
 name: "Bayrol Automatic CL/PH"
 description: "Bayrol PoolAccess CL/PH dosing system integration via MQTT Discovery"
-version: "0.8.0"
+version: "0.10.0"
 slug: "bayrol_cl_ph"
 arch:
   - aarch64

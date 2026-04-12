@@ -15,7 +15,7 @@
 - Config via `/data/options.json`
 
 ## Key Files
-- `bayrol-cl-ph/src/sensors.py` — All 26 sensors + 7 binary sensors with register addresses and transformations
+- `bayrol-cl-ph/src/sensors.py` — Sensors, binary sensors, writable numbers, writable selects with register addresses and transformations
 - `bayrol-cl-ph/src/bayrol_bridge.py` — MQTT bridge, discovery, canister tracking integration
 - `bayrol-cl-ph/src/canister_tracker.py` — Canister level tracking with file persistence
 - `bayrol-cl-ph/src/main.py` — Main loop, notifications via HA Supervisor API
@@ -26,13 +26,25 @@
 - Bayrol cloud MQTT broker at wss://www.bayrol-poolaccess.de:8083 (WebSocket Secure)
 - MQTT v5, requires username/password (PoolAccess credentials)
 - Device ID: `23ACL2-04714` (configurable)
-- Topics: `d02/{device_id}/v/{register}` for values, `d02/{device_id}/g/{register}` for refresh
+- Topics:
+  - `d02/{device_id}/v/{register}` — read values (subscribe)
+  - `d02/{device_id}/g/{register}` — refresh/get (publish empty)
+  - `d02/{device_id}/s/{register}` — write/set (publish `{"t":"{register}","v":{value}}`)
 - **Payload formats (BOTH must be handled!):**
   - Single: `{"t":"4.78","v":78,"status":"17.2"}`
   - Batch array: `[{"t":"4.2","v":71}, {"t":"4.3","v":76}, ...]` on batch topics like `/v/22`
 - Transformations: /10 for pH and temp, /100 for min control, *100 for pump capacity
-- Production rate mapping: 19.5→75%, 19.6→100%, 19.7→125%
+- Production rate mapping: 19.3→25%, 19.4→50%, 19.5→75%, 19.6→100%, 19.7→125%, 19.8→150%, 19.9→200%, 19.10→300%, 19.11→500%, 19.12→1000%
 - Binary sensors use string comparison: "19.54"=pump on, "19.17"=automatic on, "19.177"=filtration on, "19.258"=canister empty
+- Text-mapped status codes: STATUS_TEXT_MAP for flow/gas/problem sensors, specific maps for filtration/out modes
+- Trailing-zero MQTT codes (19.100, 19.330) need both normalized and original keys in lookups
+- **Writable entities** (number/select, via `/s/` topic):
+  - pH Target (4.2), pH Alert Max (4.3), pH Alert Min (4.4) — coefficient 10
+  - Redox Target (4.28), Redox Alert Max (4.26), Redox Alert Min (4.27) — coefficient 1
+  - Start Delay (4.37) — coefficient 1, range 1–60 min
+  - pH Production Rate (5.3), Chlor Production Rate (5.175) — text-mapped select
+  - Filtration Mode (5.184) — select: Low/Med/High/Auto/Smart/Frost/Off
+  - Out 1–4 Mode (5.186–5.189) — select: On/Off/Auto
 
 ## Canister Tracking
 - Consumption formula: `flow_ml_h = pump_capacity × (production_rate/100) × (dosing_rate/100)`
