@@ -8,7 +8,7 @@
 ## Architecture
 - Python addon with two paho-mqtt connections:
   1. WSS to Bayrol cloud (wss://www.bayrol-poolaccess.de:8083, MQTT v5)
-  2. TCP to local Mosquitto (192.168.2.158:1883, MQTT v3.11)
+  2. TCP to local Mosquitto (MQTT v3.11)
 - Subscribes to `d02/{device_id}/#` on Bayrol broker
 - Transforms values and publishes via MQTT Discovery to local broker
 - Refresh mechanism: publishes empty messages to `/g/` topics every 15 min
@@ -25,7 +25,7 @@
 ## Bayrol Protocol
 - Bayrol cloud MQTT broker at wss://www.bayrol-poolaccess.de:8083 (WebSocket Secure)
 - MQTT v5, requires username/password (PoolAccess credentials)
-- Device ID: `23ACL2-04714` (configurable)
+- Device ID configurable
 - Topics:
   - `d02/{device_id}/v/{register}` — read values (subscribe)
   - `d02/{device_id}/g/{register}` — refresh/get (publish empty)
@@ -55,9 +55,8 @@
 - HA REST API does NOT support creating input_number helpers programmatically — that's why file persistence
 
 ## Device Identity
-- Identifier: `bayrol_cl_ph_{device_id_normalized}` (e.g. `bayrol_cl_ph_23acl2_04714`)
-- Name includes device ID: "Bayrol Automatic CL/PH (23ACL2-04714)"
-- Intentionally different from old mqtt.yaml device ID (`23ACL2-04714`) for parallel operation
+- Identifier: `bayrol_cl_ph_{device_id_normalized}`
+- Name includes device ID: "Bayrol Automatic CL/PH {device_id}"
 
 ## Important Notes
 - Bayrol credentials: username looks like MD5 hash, password from PoolAccess account
