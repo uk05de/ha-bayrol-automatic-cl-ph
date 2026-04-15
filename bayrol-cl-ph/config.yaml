@@ -14,9 +14,9 @@ homeassistant_api: true
 options:
   bayrol_username: ""
   bayrol_password: ""
-  device_id: "23ACL2-04714"
+  device_id: ""
   refresh_interval: 900
-  mqtt_host: "192.168.2.158"
+  mqtt_host: ""
   mqtt_port: 1883
   mqtt_user: ""
   mqtt_password: ""
