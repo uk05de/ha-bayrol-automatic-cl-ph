@@ -98,25 +98,19 @@ class CanisterTracker:
         if elapsed_s <= 0 or elapsed_s > 3600:
             return
 
-        # pH consumption
+        # Peristaltic pumps run at full capacity when ON; duty cycle (prod_rate,
+        # dosing_rate) is already physically realized via pump_state ON/OFF pulses.
+        # Multiplying the rates here would double-count the duty cycle.
+
         if self._values["ph_pump_state"]:
-            ph_flow_ml_h = (
-                self._values["ph_pump_capacity"]
-                * (self._values["ph_prod_rate"] / 100.0)
-                * (self._values["ph_dosing_rate"] / 100.0)
-            )
+            ph_flow_ml_h = self._values["ph_pump_capacity"]
             consumed = ph_flow_ml_h * (elapsed_s / 3600.0)
             self._consumed_ph_ml += consumed
             if consumed > 0:
                 log.debug("pH consumed: %.2f ml (flow: %.1f ml/h)", consumed, ph_flow_ml_h)
 
-        # Chlor consumption
         if self._values["cl_pump_state"]:
-            cl_flow_ml_h = (
-                self._values["cl_pump_capacity"]
-                * (self._values["cl_prod_rate"] / 100.0)
-                * (self._values["cl_dosing_rate"] / 100.0)
-            )
+            cl_flow_ml_h = self._values["cl_pump_capacity"]
             consumed = cl_flow_ml_h * (elapsed_s / 3600.0)
             self._consumed_cl_ml += consumed
             if consumed > 0:
