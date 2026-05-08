@@ -50,6 +50,11 @@ class CanisterTracker:
         self._consumed_cl_today_ml = 0.0
         self._today_date: str = date.today().isoformat()
         self._last_calc_time = time.monotonic()
+        # Event-driven ON-time tracking — exact duration zwischen
+        # OFF→ON und ON→OFF Transitions. Vermeidet Sampling-Aliasing
+        # bei kurzen Pump-Pulsen (z.B. 4.8s ON bei 8% Duty).
+        self._ph_pump_on_since: float | None = None
+        self._cl_pump_on_since: float | None = None
 
         # Alert state (to avoid repeated notifications)
         self._ph_alert_sent = False
@@ -114,14 +119,71 @@ class CanisterTracker:
     # --- Sensor value updates ---
 
     def update_value(self, key: str, value):
-        """Update a sensor value used for consumption calculation."""
-        if key in self._values:
+        """Update a sensor value used for consumption calculation.
+
+        Für pump_state-Keys: detect Transitionen und akkumuliere event-driven
+        die exakte ON-Dauer (vermeidet Sampling-Aliasing bei kurzen Pulsen).
+        """
+        if key not in self._values:
+            return
+
+        if key in ("ph_pump_state", "cl_pump_state"):
+            old_value = self._values[key]
             self._values[key] = value
+            if old_value != value:
+                self._handle_pump_transition(key, value)
+        else:
+            self._values[key] = value
+
+    def _handle_pump_transition(self, key: str, new_state: bool) -> None:
+        """Behandle pump_state-Transition: bei ON merken wann, bei OFF
+        Dauer × Kapazität in Counter rechnen."""
+        now = time.monotonic()
+        # Tageswechsel-Check vor Akkumulation
+        self._maybe_reset_today_counters()
+
+        if key == "ph_pump_state":
+            if new_state:
+                # OFF→ON
+                self._ph_pump_on_since = now
+                log.debug("pH pump ON @ %.1f", now)
+            else:
+                # ON→OFF
+                if self._ph_pump_on_since is not None:
+                    duration_s = now - self._ph_pump_on_since
+                    consumed = self._values["ph_pump_capacity"] * (duration_s / 3600.0)
+                    self._consumed_ph_ml += consumed
+                    self._consumed_ph_today_ml += consumed
+                    log.debug(
+                        "pH pump OFF: %.2fs ON → %.2f ml dosed",
+                        duration_s, consumed,
+                    )
+                    self._ph_pump_on_since = None
+        elif key == "cl_pump_state":
+            if new_state:
+                self._cl_pump_on_since = now
+                log.debug("CL pump ON @ %.1f", now)
+            else:
+                if self._cl_pump_on_since is not None:
+                    duration_s = now - self._cl_pump_on_since
+                    consumed = self._values["cl_pump_capacity"] * (duration_s / 3600.0)
+                    self._consumed_cl_ml += consumed
+                    self._consumed_cl_today_ml += consumed
+                    log.debug(
+                        "CL pump OFF: %.2fs ON → %.2f ml dosed",
+                        duration_s, consumed,
+                    )
+                    self._cl_pump_on_since = None
 
     # --- Consumption calculation ---
 
     def calculate(self):
-        """Calculate consumption since last call. Call this periodically."""
+        """Periodischer Tick — akkumuliert KEINE pump-Zeiten (das passiert
+        event-driven in _handle_pump_transition). Diese Funktion sorgt nur
+        für Tageswechsel-Reset und ggf. Live-Update bei aktuell laufender
+        Pumpe (damit der Today-Sensor in HA nicht erst beim OFF-Event
+        aktualisiert wird).
+        """
         now = time.monotonic()
         elapsed_s = now - self._last_calc_time
         self._last_calc_time = now
@@ -129,28 +191,15 @@ class CanisterTracker:
         if elapsed_s <= 0 or elapsed_s > 3600:
             return
 
-        # Tageswechsel-Check vor jeder Akkumulation (saubere Reset um 00:00)
+        # Tageswechsel-Check
         self._maybe_reset_today_counters()
 
-        # Peristaltic pumps run at full capacity when ON; duty cycle (prod_rate,
-        # dosing_rate) is already physically realized via pump_state ON/OFF pulses.
-        # Multiplying the rates here would double-count the duty cycle.
-
-        if self._values["ph_pump_state"]:
-            ph_flow_ml_h = self._values["ph_pump_capacity"]
-            consumed = ph_flow_ml_h * (elapsed_s / 3600.0)
-            self._consumed_ph_ml += consumed
-            self._consumed_ph_today_ml += consumed
-            if consumed > 0:
-                log.debug("pH consumed: %.2f ml (flow: %.1f ml/h)", consumed, ph_flow_ml_h)
-
-        if self._values["cl_pump_state"]:
-            cl_flow_ml_h = self._values["cl_pump_capacity"]
-            consumed = cl_flow_ml_h * (elapsed_s / 3600.0)
-            self._consumed_cl_ml += consumed
-            self._consumed_cl_today_ml += consumed
-            if consumed > 0:
-                log.debug("CL consumed: %.2f ml (flow: %.1f ml/h)", consumed, cl_flow_ml_h)
+        # Live-Update für aktuell laufende Pumpe — wir akkumulieren in der
+        # Counter, machen das aber bei der nächsten OFF-Transition rückgängig
+        # damit es zur exakten Duration passt. Stattdessen: kein Live-Update,
+        # Today-Sensor zeigt erst beim OFF die neue Dosis.
+        # → keine Aktion in calculate(). pump-Akkumulation ist 100%
+        #   event-driven via _handle_pump_transition.
 
     # --- Remaining levels ---
 
