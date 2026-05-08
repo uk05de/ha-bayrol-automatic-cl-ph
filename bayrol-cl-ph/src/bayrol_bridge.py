@@ -666,6 +666,52 @@ class BayrolBridge:
                     "device": device_info,
                 }), qos=1, retain=True
             )
+            # Tagesverbrauch (read-only, resettet um 00:00 lokal)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_dosed_today/config",
+                json.dumps({
+                    "name": f"{name} Verbrauch heute",
+                    "unique_id": f"bayrol_{ctype}_dosed_today",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/{ctype}_dosed_today/state",
+                    "unit_of_measurement": "ml",
+                    "icon": "mdi:water-percent",
+                    "state_class": "total_increasing",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Day-Limit-Status (binary, true wenn Tageslimit erreicht)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/binary_sensor/bayrol/{ctype}_day_limit_reached/config",
+                json.dumps({
+                    "name": f"{name} Tageslimit erreicht",
+                    "unique_id": f"bayrol_{ctype}_day_limit_reached",
+                    "state_topic": f"{TOPIC_PREFIX}/binary_sensor/{ctype}_day_limit_reached/state",
+                    "icon": "mdi:alert-octagon",
+                    "device_class": "problem",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
+            # Day-Limit-Restmenge (read-only, ml verbleibend bis Limit)
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{ctype}_day_limit_remaining/config",
+                json.dumps({
+                    "name": f"{name} Tageslimit Restmenge",
+                    "unique_id": f"bayrol_{ctype}_day_limit_remaining",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/{ctype}_day_limit_remaining/state",
+                    "unit_of_measurement": "ml",
+                    "icon": "mdi:gauge",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }), qos=1, retain=True
+            )
 
         self._discovery_sent = True
         # Publish initial availability so entities appear in HA
@@ -700,6 +746,26 @@ class BayrolBridge:
         self._local.publish(
             f"{TOPIC_PREFIX}/sensor/cl_canister_consumed/state",
             str(self.canister.cl_consumed_liters), retain=True)
+        # Tagesverbrauch (resettet 00:00)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/ph_dosed_today/state",
+            str(self.canister.ph_dosed_today_ml), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/cl_dosed_today/state",
+            str(self.canister.cl_dosed_today_ml), retain=True)
+        # Day-Limit-Status
+        self._local.publish(
+            f"{TOPIC_PREFIX}/binary_sensor/ph_day_limit_reached/state",
+            "ON" if self.canister.ph_day_limit_reached else "OFF", retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/binary_sensor/cl_day_limit_reached/state",
+            "ON" if self.canister.cl_day_limit_reached else "OFF", retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/ph_day_limit_remaining/state",
+            str(self.canister.ph_day_limit_remaining_ml), retain=True)
+        self._local.publish(
+            f"{TOPIC_PREFIX}/sensor/cl_day_limit_remaining/state",
+            str(self.canister.cl_day_limit_remaining_ml), retain=True)
 
     def update_canister(self):
         """Calculate consumption, publish state, check alerts. Call periodically."""

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from datetime import date
 
 log = logging.getLogger("bayrol.canister")
 
@@ -24,6 +25,10 @@ class CanisterTracker:
         self.canister_size_cl = config.get("canister_size_cl", 25.0)  # liters
         self.canister_size_ph = config.get("canister_size_ph", 25.0)  # liters
         self.alert_threshold = config.get("alert_threshold", 20)  # percent remaining
+        # Optional Day-Limits (in ml). Wenn 0 / nicht gesetzt: kein Limit-
+        # Tracking. Bayrol Standard ist 1.6 L = 1600 ml für pH-minus.
+        self.ph_day_limit_ml = float(config.get("ph_day_limit_ml", 0))
+        self.cl_day_limit_ml = float(config.get("cl_day_limit_ml", 0))
 
         # Current sensor values (updated from bridge)
         self._values = {
@@ -37,9 +42,13 @@ class CanisterTracker:
             "cl_dosing_rate": 0,        # %
         }
 
-        # Consumed amounts in ml
+        # Consumed amounts in ml — Lifetime-Counter
         self._consumed_cl_ml = 0.0
         self._consumed_ph_ml = 0.0
+        # Today-Counter (resettet um 00:00 lokal)
+        self._consumed_ph_today_ml = 0.0
+        self._consumed_cl_today_ml = 0.0
+        self._today_date: str = date.today().isoformat()
         self._last_calc_time = time.monotonic()
 
         # Alert state (to avoid repeated notifications)
@@ -59,10 +68,16 @@ class CanisterTracker:
                     state = json.load(f)
                 self._consumed_cl_ml = state.get("consumed_cl_ml", 0.0)
                 self._consumed_ph_ml = state.get("consumed_ph_ml", 0.0)
+                self._consumed_ph_today_ml = state.get("consumed_ph_today_ml", 0.0)
+                self._consumed_cl_today_ml = state.get("consumed_cl_today_ml", 0.0)
+                self._today_date = state.get("today_date", date.today().isoformat())
                 self._ph_alert_sent = state.get("ph_alert_sent", False)
                 self._cl_alert_sent = state.get("cl_alert_sent", False)
-                log.info("Loaded canister state: CL %.0f ml, pH %.0f ml consumed",
-                         self._consumed_cl_ml, self._consumed_ph_ml)
+                # Wenn nach Restart anderer Tag → Today-Counter zurücksetzen
+                self._maybe_reset_today_counters()
+                log.info("Loaded canister state: CL %.0f ml, pH %.0f ml consumed (today: pH %.0f, CL %.0f)",
+                         self._consumed_cl_ml, self._consumed_ph_ml,
+                         self._consumed_ph_today_ml, self._consumed_cl_today_ml)
             except (json.JSONDecodeError, IOError) as e:
                 log.warning("Failed to load canister state: %s", e)
 
@@ -71,6 +86,9 @@ class CanisterTracker:
         state = {
             "consumed_cl_ml": round(self._consumed_cl_ml, 2),
             "consumed_ph_ml": round(self._consumed_ph_ml, 2),
+            "consumed_ph_today_ml": round(self._consumed_ph_today_ml, 2),
+            "consumed_cl_today_ml": round(self._consumed_cl_today_ml, 2),
+            "today_date": self._today_date,
             "ph_alert_sent": self._ph_alert_sent,
             "cl_alert_sent": self._cl_alert_sent,
         }
@@ -79,6 +97,19 @@ class CanisterTracker:
                 json.dump(state, f)
         except IOError as e:
             log.error("Failed to save canister state: %s", e)
+
+    def _maybe_reset_today_counters(self):
+        """Wenn lokaler Tag gewechselt hat, Today-Counter zurücksetzen."""
+        current_date = date.today().isoformat()
+        if current_date != self._today_date:
+            log.info(
+                "Pool Advisor: Tageswechsel %s → %s — Today-Counter reset (pH war %.0f ml, CL war %.0f ml)",
+                self._today_date, current_date,
+                self._consumed_ph_today_ml, self._consumed_cl_today_ml,
+            )
+            self._consumed_ph_today_ml = 0.0
+            self._consumed_cl_today_ml = 0.0
+            self._today_date = current_date
 
     # --- Sensor value updates ---
 
@@ -98,6 +129,9 @@ class CanisterTracker:
         if elapsed_s <= 0 or elapsed_s > 3600:
             return
 
+        # Tageswechsel-Check vor jeder Akkumulation (saubere Reset um 00:00)
+        self._maybe_reset_today_counters()
+
         # Peristaltic pumps run at full capacity when ON; duty cycle (prod_rate,
         # dosing_rate) is already physically realized via pump_state ON/OFF pulses.
         # Multiplying the rates here would double-count the duty cycle.
@@ -106,6 +140,7 @@ class CanisterTracker:
             ph_flow_ml_h = self._values["ph_pump_capacity"]
             consumed = ph_flow_ml_h * (elapsed_s / 3600.0)
             self._consumed_ph_ml += consumed
+            self._consumed_ph_today_ml += consumed
             if consumed > 0:
                 log.debug("pH consumed: %.2f ml (flow: %.1f ml/h)", consumed, ph_flow_ml_h)
 
@@ -113,6 +148,7 @@ class CanisterTracker:
             cl_flow_ml_h = self._values["cl_pump_capacity"]
             consumed = cl_flow_ml_h * (elapsed_s / 3600.0)
             self._consumed_cl_ml += consumed
+            self._consumed_cl_today_ml += consumed
             if consumed > 0:
                 log.debug("CL consumed: %.2f ml (flow: %.1f ml/h)", consumed, cl_flow_ml_h)
 
@@ -143,6 +179,44 @@ class CanisterTracker:
     @property
     def cl_consumed_liters(self) -> float:
         return round(self._consumed_cl_ml / 1000, 2)
+
+    # --- Tagesverbrauch ---
+
+    @property
+    def ph_dosed_today_ml(self) -> float:
+        self._maybe_reset_today_counters()
+        return round(self._consumed_ph_today_ml, 1)
+
+    @property
+    def cl_dosed_today_ml(self) -> float:
+        self._maybe_reset_today_counters()
+        return round(self._consumed_cl_today_ml, 1)
+
+    @property
+    def ph_day_limit_reached(self) -> bool:
+        if self.ph_day_limit_ml <= 0:
+            return False
+        return self._consumed_ph_today_ml >= self.ph_day_limit_ml
+
+    @property
+    def cl_day_limit_reached(self) -> bool:
+        if self.cl_day_limit_ml <= 0:
+            return False
+        return self._consumed_cl_today_ml >= self.cl_day_limit_ml
+
+    @property
+    def ph_day_limit_remaining_ml(self) -> float:
+        if self.ph_day_limit_ml <= 0:
+            return 0.0
+        remaining = self.ph_day_limit_ml - self._consumed_ph_today_ml
+        return max(0.0, round(remaining, 1))
+
+    @property
+    def cl_day_limit_remaining_ml(self) -> float:
+        if self.cl_day_limit_ml <= 0:
+            return 0.0
+        remaining = self.cl_day_limit_ml - self._consumed_cl_today_ml
+        return max(0.0, round(remaining, 1))
 
     # --- Alerts ---
 
