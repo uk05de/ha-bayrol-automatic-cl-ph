@@ -415,6 +415,12 @@ class BayrolBridge:
                 state_topic = f"{TOPIC_PREFIX}/number/{number_sensor['unique_id']}/state"
                 self._local.publish(state_topic, str(display_value), retain=True)
                 log.info("Set %s = %s (MQTT value: %d)", number_sensor["name"], payload, mqtt_value)
+                # Wichtig: Bei target-Updates internen Cache auch hier sofort
+                # aktualisieren + Toleranz neu berechnen — sonst hinkt es bis
+                # zum Cloud-Echo dem User-Setting hinterher.
+                if number_sensor["unique_id"] in ("ph_target", "redox_target"):
+                    self._latest_values[number_sensor["unique_id"]] = display_value
+                    self._recompute_derived()
             except (ValueError, TypeError) as e:
                 log.warning("Invalid value for %s: %s (%s)", number_sensor["name"], payload, e)
             return
