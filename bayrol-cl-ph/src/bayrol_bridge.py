@@ -8,6 +8,7 @@
 
 import json
 import logging
+import os
 import time
 import ssl
 
@@ -16,6 +17,7 @@ import paho.mqtt.client as mqtt
 from sensors import (
     SENSORS, BINARY_SENSORS,
     WRITABLE_NUMBERS, WRITABLE_SELECTS,
+    LOCAL_NUMBERS, DERIVED_SENSORS,
     transform_value, transform_select, evaluate_binary,
 )
 from canister_tracker import CanisterTracker
@@ -28,6 +30,11 @@ BAYROL_WSS_PATH = "/mqtt"
 
 DISCOVERY_PREFIX = "homeassistant"
 TOPIC_PREFIX = "bayrol_cl_ph"
+
+# Marker file: legt fest dass die LOCAL_NUMBERS Defaults schon einmal
+# publiziert wurden. So überschreiben wir bei Restart keine User-Werte
+# (MQTT retain stellt die ohnehin wieder her).
+LOCAL_DEFAULTS_MARKER = "/data/local_numbers_initialized"
 
 
 class BayrolBridge:
@@ -42,6 +49,12 @@ class BayrolBridge:
         # --- Shelly integration (optional) ---
         self._shelly_prefix = config.get("shelly_topic_prefix", "").strip()
         self._shelly_rpc_id = 0
+
+        # --- Latest values für Derived-Sensors (Toleranz-Band-Berechnung) ---
+        # Cache von {unique_id: value} für ph_target, redox_target und
+        # LOCAL_NUMBERS-Werte. Wird bei jedem relevanten Update upgedated
+        # und triggert _recompute_derived().
+        self._latest_values: dict[str, float] = {}
 
         # --- Pump-Gating für Sonden-Companion-Entities ---
         # filtration_state==ON UND seit X Sek stabil → Sonden-Werte fließen
@@ -222,6 +235,9 @@ class BayrolBridge:
             state_topic = f"{TOPIC_PREFIX}/number/{sensor['unique_id']}/state"
             self._local.publish(state_topic, str(value), retain=True)
             log.debug("Published %s = %s", sensor["name"], value)
+            if sensor["unique_id"] in ("ph_target", "redox_target"):
+                self._latest_values[sensor["unique_id"]] = value
+                self._recompute_derived()
 
         elif component == "select":
             display_value = transform_select(sensor, raw_value)
@@ -277,6 +293,45 @@ class BayrolBridge:
             log.info("Filtration AUS — gated Sonden frieren auf letztem Wert")
         self._last_filtration_state = is_on
 
+    # --- Derived sensors (berechnete Toleranz-Min/Max aus Target + Offset) ---
+
+    def _recompute_derived(self) -> None:
+        """Berechne und publiziere alle DERIVED_SENSORS deren Abhängigkeiten
+        verfügbar sind. Wird gerufen wenn ph_target, redox_target oder eine
+        LOCAL_NUMBER ihren Wert ändert."""
+        for ds in DERIVED_SENSORS:
+            deps = ds["depends_on"]
+            if not all(d in self._latest_values for d in deps):
+                continue
+            inputs = {d: self._latest_values[d] for d in deps}
+            try:
+                value = ds["compute"](inputs)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Compute failed for %s: %s", ds["unique_id"], e)
+                continue
+            state_topic = f"{TOPIC_PREFIX}/sensor/{ds['unique_id']}/state"
+            self._local.publish(state_topic, str(value), retain=True)
+            log.debug("Computed %s = %s", ds["unique_id"], value)
+
+    def _publish_local_defaults_if_first_run(self) -> None:
+        """Erstinitialisierung: publiziert LOCAL_NUMBERS-Defaults nur einmal
+        pro Installation. Marker-Datei in /data persistiert Lauf-Zustand,
+        damit User-Werte bei Bridge-Restart nicht überschrieben werden."""
+        if os.path.exists(LOCAL_DEFAULTS_MARKER):
+            return
+        for ln in LOCAL_NUMBERS:
+            state_topic = f"{TOPIC_PREFIX}/number/{ln['unique_id']}/state"
+            self._local.publish(state_topic, str(ln["default"]), retain=True)
+            self._latest_values[ln["unique_id"]] = float(ln["default"])
+            log.info(
+                "Erstinitialisierung %s = %s", ln["unique_id"], ln["default"]
+            )
+        try:
+            with open(LOCAL_DEFAULTS_MARKER, "w") as f:
+                f.write("1\n")
+        except OSError as e:
+            log.warning("Marker-Datei konnte nicht geschrieben werden: %s", e)
+
     def _on_bayrol_disconnect(self, client, userdata, rc, properties=None):
         if rc != 0:
             log.warning("Bayrol cloud disconnected unexpectedly (rc=%d), will reconnect", rc)
@@ -298,6 +353,12 @@ class BayrolBridge:
                 client.subscribe(f"{TOPIC_PREFIX}/number/{s['unique_id']}/set")
             for s in WRITABLE_SELECTS:
                 client.subscribe(f"{TOPIC_PREFIX}/select/{s['unique_id']}/set")
+            # Local-only writable numbers (HA-side Pool-Config): SET commands +
+            # state-topic-subscribe um retained user-values bei Restart wieder
+            # in self._latest_values zu laden.
+            for ln in LOCAL_NUMBERS:
+                client.subscribe(f"{TOPIC_PREFIX}/number/{ln['unique_id']}/set")
+                client.subscribe(f"{TOPIC_PREFIX}/number/{ln['unique_id']}/state")
             # Subscribe to Shelly status (if configured)
             if self._shelly_prefix:
                 client.subscribe(f"{self._shelly_prefix}/status/switch:0")
@@ -357,6 +418,29 @@ class BayrolBridge:
             except (ValueError, TypeError) as e:
                 log.warning("Invalid value for %s: %s (%s)", number_sensor["name"], payload, e)
             return
+
+        # Local-only writable numbers (Toleranz-Offsets, kein Bayrol-Write)
+        for ln in LOCAL_NUMBERS:
+            set_topic = f"{TOPIC_PREFIX}/number/{ln['unique_id']}/set"
+            state_topic = f"{TOPIC_PREFIX}/number/{ln['unique_id']}/state"
+            if topic == set_topic:
+                try:
+                    value = float(payload)
+                    self._local.publish(state_topic, str(value), retain=True)
+                    self._latest_values[ln["unique_id"]] = value
+                    self._recompute_derived()
+                    log.info("Set %s = %s (local-only)", ln["name"], value)
+                except ValueError:
+                    log.warning("Invalid value for %s: %s", ln["name"], payload)
+                return
+            if topic == state_topic:
+                # Retained value von vorherigem Lauf — laden, keine Echo-Publish
+                try:
+                    self._latest_values[ln["unique_id"]] = float(payload)
+                    self._recompute_derived()
+                except ValueError:
+                    pass
+                return
 
         # Writable select entities (production rates, filtration mode, out modes)
         select_sensor = self._select_cmd_topics.get(topic)
@@ -783,13 +867,70 @@ class BayrolBridge:
                 }), qos=1, retain=True
             )
 
+        # --- Local writable numbers (HA-only, Toleranz-Offsets) ---
+        for ln in LOCAL_NUMBERS:
+            local_config = {
+                "name": ln["name"],
+                "unique_id": f"bayrol_{ln['unique_id']}",
+                "state_topic": f"{TOPIC_PREFIX}/number/{ln['unique_id']}/state",
+                "command_topic": f"{TOPIC_PREFIX}/number/{ln['unique_id']}/set",
+                "min": ln["min"],
+                "max": ln["max"],
+                "step": ln["step"],
+                "mode": "box",
+                "device": device_info,
+                "availability_topic": f"{TOPIC_PREFIX}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }
+            if "unit" in ln:
+                local_config["unit_of_measurement"] = ln["unit"]
+            if "icon" in ln:
+                local_config["icon"] = ln["icon"]
+            if "entity_category" in ln:
+                local_config["entity_category"] = ln["entity_category"]
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/number/bayrol/{ln['unique_id']}/config",
+                json.dumps(local_config), qos=1, retain=True,
+            )
+
+        # --- Derived sensors (Toleranz-Min/Max berechnet aus Target + Offset) ---
+        for ds in DERIVED_SENSORS:
+            ds_config = {
+                "name": ds["name"],
+                "unique_id": f"bayrol_{ds['unique_id']}",
+                "state_topic": f"{TOPIC_PREFIX}/sensor/{ds['unique_id']}/state",
+                "device": device_info,
+                "availability_topic": f"{TOPIC_PREFIX}/availability",
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }
+            if "unit" in ds:
+                ds_config["unit_of_measurement"] = ds["unit"]
+            if "device_class" in ds:
+                ds_config["device_class"] = ds["device_class"]
+            if "state_class" in ds:
+                ds_config["state_class"] = ds["state_class"]
+            if "icon" in ds:
+                ds_config["icon"] = ds["icon"]
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/sensor/bayrol/{ds['unique_id']}/config",
+                json.dumps(ds_config), qos=1, retain=True,
+            )
+
         self._discovery_sent = True
         # Publish initial availability so entities appear in HA
         self._local.publish(f"{TOPIC_PREFIX}/availability", "online", retain=True)
         # Publish initial canister state
         self.publish_canister_state()
-        log.info("MQTT Discovery published (%d sensors, %d binary, %d numbers, %d selects, canister entities)",
-                 len(SENSORS), len(BINARY_SENSORS), len(WRITABLE_NUMBERS), len(WRITABLE_SELECTS))
+        # Erstinitialisierung der LOCAL_NUMBERS-Defaults (no-op nach 1. Lauf)
+        self._publish_local_defaults_if_first_run()
+        log.info(
+            "MQTT Discovery published (%d sensors, %d binary, %d numbers, %d selects, "
+            "%d local-numbers, %d derived-sensors, canister entities)",
+            len(SENSORS), len(BINARY_SENSORS), len(WRITABLE_NUMBERS),
+            len(WRITABLE_SELECTS), len(LOCAL_NUMBERS), len(DERIVED_SENSORS),
+        )
 
     # --- Canister ---
 

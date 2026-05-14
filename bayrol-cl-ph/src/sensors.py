@@ -265,6 +265,91 @@ SENSORS = [
 
 
 # ---------------------------------------------------------------------------
+#  Local writable numbers (HA-only, kein Bayrol-Register — Pool-Konfig-Hub)
+#
+#  Bayrol-Anlage kennt nur Target + Alert-Min/Max. Pool-Advisor braucht
+#  zusätzlich ein „Toleranz-Band" zwischen Target und Alarm. Statt das in
+#  Pool-Advisor-Config zu duplizieren, definieren wir hier den symmetrischen
+#  Offset um den Bayrol-Target, aus dem ph_tolerance_min/max berechnet werden
+#  (siehe DERIVED_SENSORS). Werte werden in HA via MQTT-retain persistiert.
+# ---------------------------------------------------------------------------
+
+LOCAL_NUMBERS = [
+    {
+        "unique_id": "ph_tolerance_offset",
+        "name": "pH Toleranz Offset",
+        "default": 0.2,
+        "min": 0.05,
+        "max": 1.0,
+        "step": 0.05,
+        "unit": "pH",
+        "icon": "mdi:plus-minus",
+        "entity_category": "config",
+    },
+    {
+        "unique_id": "redox_tolerance_offset",
+        "name": "Redox Toleranz Offset",
+        "default": 50,
+        "min": 5,
+        "max": 200,
+        "step": 5,
+        "unit": "mV",
+        "icon": "mdi:plus-minus",
+        "entity_category": "config",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+#  Derived read-only sensors (berechnet aus anderen Werten)
+#
+#  Werden neu berechnet wenn eine der `depends_on`-Quellen ihren Wert ändert.
+#  Pool-Advisor und Charts können diese direkt als Entity referenzieren.
+# ---------------------------------------------------------------------------
+
+DERIVED_SENSORS = [
+    {
+        "unique_id": "ph_tolerance_min",
+        "name": "pH Toleranz Min",
+        "depends_on": ["ph_target", "ph_tolerance_offset"],
+        "compute": lambda v: round(v["ph_target"] - v["ph_tolerance_offset"], 2),
+        "unit": "pH",
+        "icon": "mdi:arrow-collapse-down",
+        "state_class": "measurement",
+    },
+    {
+        "unique_id": "ph_tolerance_max",
+        "name": "pH Toleranz Max",
+        "depends_on": ["ph_target", "ph_tolerance_offset"],
+        "compute": lambda v: round(v["ph_target"] + v["ph_tolerance_offset"], 2),
+        "unit": "pH",
+        "icon": "mdi:arrow-collapse-up",
+        "state_class": "measurement",
+    },
+    {
+        "unique_id": "redox_tolerance_min",
+        "name": "Redox Toleranz Min",
+        "depends_on": ["redox_target", "redox_tolerance_offset"],
+        "compute": lambda v: round(v["redox_target"] - v["redox_tolerance_offset"]),
+        "unit": "mV",
+        "icon": "mdi:arrow-collapse-down",
+        "device_class": "voltage",
+        "state_class": "measurement",
+    },
+    {
+        "unique_id": "redox_tolerance_max",
+        "name": "Redox Toleranz Max",
+        "depends_on": ["redox_target", "redox_tolerance_offset"],
+        "compute": lambda v: round(v["redox_target"] + v["redox_tolerance_offset"]),
+        "unit": "mV",
+        "icon": "mdi:arrow-collapse-up",
+        "device_class": "voltage",
+        "state_class": "measurement",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 #  Writable number entities (settable via Bayrol cloud /s/ topic)
 # ---------------------------------------------------------------------------
 
