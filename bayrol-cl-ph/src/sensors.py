@@ -72,6 +72,7 @@ SENSORS = [
         "transform": lambda v: round(v / 10, 2),
         "unit": "pH",
         "icon": "mdi:ph",
+        "gated": True,
     },
     {
         "register": "4.34",
@@ -132,6 +133,7 @@ SENSORS = [
         "unit": "mV",
         "device_class": "voltage",
         "state_class": "measurement",
+        "gated": True,
     },
     {
         "register": "4.90",

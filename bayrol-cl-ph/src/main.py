@@ -52,7 +52,6 @@ def send_ha_notification(message: str, target: str):
     except Exception as e:
         log.error("Failed to send notification to %s: %s", target, e)
 
-
 def main():
     if len(sys.argv) < 2:
         print("Usage: main.py /data/options.json")

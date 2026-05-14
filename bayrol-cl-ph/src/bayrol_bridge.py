@@ -43,6 +43,16 @@ class BayrolBridge:
         self._shelly_prefix = config.get("shelly_topic_prefix", "").strip()
         self._shelly_rpc_id = 0
 
+        # --- Pump-Gating für Sonden-Companion-Entities ---
+        # filtration_state==ON UND seit X Sek stabil → Sonden-Werte fließen
+        # zusätzlich in *_gated Companion-Sensoren. Sonst friert die Companion
+        # auf dem letzten Wert (= LKG aus dem letzten stable pump-on Lauf).
+        self._pump_stabilization_seconds = int(
+            config.get("pump_stabilization_seconds", 180)
+        )
+        self._filtration_on_since: float | None = None
+        self._last_filtration_state: bool | None = None
+
         # Build register lookup for fast message routing
         self._sensor_by_register = {}
         for s in SENSORS:
@@ -198,6 +208,10 @@ class BayrolBridge:
             state_topic = f"{TOPIC_PREFIX}/sensor/{sensor['unique_id']}/state"
             self._local.publish(state_topic, str(value), retain=True)
             log.debug("Published %s = %s", sensor["name"], value)
+            if sensor.get("gated") and self._is_pump_stable():
+                gated_topic = f"{TOPIC_PREFIX}/sensor/{sensor['unique_id']}_gated/state"
+                self._local.publish(gated_topic, str(value), retain=True)
+                log.debug("Published %s_gated = %s", sensor["name"], value)
             # Feed canister tracker
             ct_key = self._canister_value_map.get(sensor["unique_id"])
             if ct_key:
@@ -234,6 +248,34 @@ class BayrolBridge:
             ct_key = self._canister_binary_map.get(sensor["unique_id"])
             if ct_key:
                 self.canister.update_value(ct_key, is_on)
+            if sensor["unique_id"] == "filtration_state":
+                self._on_filtration_state_change(is_on)
+
+    # --- Pump-Gating helpers ---
+
+    def _is_pump_stable(self) -> bool:
+        """True wenn Filtration AN ist und Stabilization-Period vorbei ist."""
+        if self._filtration_on_since is None:
+            return False
+        return (
+            time.monotonic() - self._filtration_on_since
+            >= self._pump_stabilization_seconds
+        )
+
+    def _on_filtration_state_change(self, is_on: bool) -> None:
+        """Track filtration on→off / off→on Transitionen für Gating."""
+        if self._last_filtration_state == is_on:
+            return
+        if is_on:
+            self._filtration_on_since = time.monotonic()
+            log.info(
+                "Filtration AN — gated Sonden updaten nach %ds Stabilization",
+                self._pump_stabilization_seconds,
+            )
+        else:
+            self._filtration_on_since = None
+            log.info("Filtration AUS — gated Sonden frieren auf letztem Wert")
+        self._last_filtration_state = is_on
 
     def _on_bayrol_disconnect(self, client, userdata, rc, properties=None):
         if rc != 0:
@@ -451,6 +493,34 @@ class BayrolBridge:
 
             topic = f"{DISCOVERY_PREFIX}/sensor/bayrol/{sensor['unique_id']}/config"
             self._local.publish(topic, json.dumps(config), qos=1, retain=True)
+
+            # Gated companion entity (pH und Redox): hält Wert während Pumpe
+            # aus / instabil, updatet nur bei filtration_state==ON + stable.
+            if sensor.get("gated"):
+                gated_config = {
+                    "name": f"{sensor['name']} (gated)",
+                    "unique_id": f"bayrol_{sensor['unique_id']}_gated",
+                    "state_topic": f"{TOPIC_PREFIX}/sensor/{sensor['unique_id']}_gated/state",
+                    "device": device_info,
+                    "availability_topic": f"{TOPIC_PREFIX}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }
+                if "unit" in sensor:
+                    gated_config["unit_of_measurement"] = sensor["unit"]
+                if "device_class" in sensor:
+                    gated_config["device_class"] = sensor["device_class"]
+                if "state_class" in sensor:
+                    gated_config["state_class"] = sensor["state_class"]
+                if "icon" in sensor:
+                    gated_config["icon"] = sensor["icon"]
+                gated_topic = (
+                    f"{DISCOVERY_PREFIX}/sensor/bayrol/"
+                    f"{sensor['unique_id']}_gated/config"
+                )
+                self._local.publish(
+                    gated_topic, json.dumps(gated_config), qos=1, retain=True
+                )
 
         for sensor in BINARY_SENSORS:
             config = {
