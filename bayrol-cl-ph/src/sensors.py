@@ -195,6 +195,7 @@ SENSORS = [
         "unit": "\u00b0C",
         "device_class": "temperature",
         "state_class": "measurement",
+        "gated": True,
     },
     {
         "register": "4.92",
