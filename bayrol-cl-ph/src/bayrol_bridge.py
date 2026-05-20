@@ -413,7 +413,14 @@ class BayrolBridge:
                 mqtt_value = int(round(display_value * number_sensor["write_coefficient"]))
                 self._write_to_bayrol(number_sensor["register"], mqtt_value)
                 state_topic = f"{TOPIC_PREFIX}/number/{number_sensor['unique_id']}/state"
-                self._local.publish(state_topic, str(display_value), retain=True)
+                # Integer-Step (Redox, Start-Delay, Alerts mit step=5) als
+                # ganze Zahl publishen — sonst zeigt HA-UI "770,0" statt "770".
+                step = number_sensor.get("step", 1)
+                if isinstance(step, int) or (isinstance(step, float) and step.is_integer()):
+                    state_payload = str(int(round(display_value)))
+                else:
+                    state_payload = str(display_value)
+                self._local.publish(state_topic, state_payload, retain=True)
                 log.info("Set %s = %s (MQTT value: %d)", number_sensor["name"], payload, mqtt_value)
                 # Wichtig: Bei target-Updates internen Cache auch hier sofort
                 # aktualisieren + Toleranz neu berechnen — sonst hinkt es bis
@@ -432,7 +439,14 @@ class BayrolBridge:
             if topic == set_topic:
                 try:
                     value = float(payload)
-                    self._local.publish(state_topic, str(value), retain=True)
+                    step = ln.get("step", 1)
+                    if isinstance(step, int) or (
+                        isinstance(step, float) and step.is_integer()
+                    ):
+                        state_payload = str(int(round(value)))
+                    else:
+                        state_payload = str(value)
+                    self._local.publish(state_topic, state_payload, retain=True)
                     self._latest_values[ln["unique_id"]] = value
                     self._recompute_derived()
                     log.info("Set %s = %s (local-only)", ln["name"], value)
