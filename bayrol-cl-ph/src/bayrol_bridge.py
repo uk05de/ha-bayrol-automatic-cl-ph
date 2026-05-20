@@ -86,10 +86,12 @@ class BayrolBridge:
             self._select_cmd_topics[f"{TOPIC_PREFIX}/select/{s['unique_id']}/set"] = s
 
         # --- Bayrol Cloud MQTT client (WSS) ---
+        # Test v0.15.2: MQTT v3.1.1 statt v5, random client_id (paho default)
+        # Hypothese: Bayrol-Anlage akzeptiert Setpoint-Writes nur von Clients
+        # mit App-ähnlicher Identifikation. Andere Integrationen (0xQuantumHome)
+        # nutzen v3.1.1 + random client_id und können angeblich schreiben.
         self._bayrol = mqtt.Client(
-            client_id=f"ha_bayrol_{self.device_id}",
             transport="websockets",
-            protocol=mqtt.MQTTv5,
         )
         self._bayrol.ws_set_options(path=BAYROL_WSS_PATH)
         self._bayrol.tls_set(tls_version=ssl.PROTOCOL_TLS_CLIENT)
