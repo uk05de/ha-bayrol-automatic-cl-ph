@@ -541,9 +541,14 @@ class BayrolBridge:
     # --- Write to Bayrol ---
 
     def _write_to_bayrol(self, register, value):
-        """Write a value to the Bayrol cloud via /s/ topic."""
+        """Write a value to the Bayrol cloud via /s/ topic.
+
+        Compact JSON (no whitespace) — andere Bayrol-Integrationen nutzen
+        manuelle String-Formatierung ohne Spaces. Bayrol's interner Parser
+        könnte strict sein und Whitespace ablehnen.
+        """
         topic = f"d02/{self.device_id}/s/{register}"
-        payload = json.dumps({"t": register, "v": value})
+        payload = json.dumps({"t": register, "v": value}, separators=(",", ":"))
         self._bayrol.publish(topic, payload, qos=1)
         log.info("Published to Bayrol: %s = %s", topic, payload)
 
