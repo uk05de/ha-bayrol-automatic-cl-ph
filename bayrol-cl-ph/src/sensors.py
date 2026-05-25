@@ -573,38 +573,6 @@ BINARY_SENSORS = [
 #  Transform functions
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-#  Writable switches (Test: pH-Auto / Chlor-Auto via /s/-Topic)
-#
-#  Bayrol-Anlage exposed pH-Automatik (5.42) und Chlor-Automatik (5.154) als
-#  Status-Sensoren mit Werten "19.17" (an) / "19.18" (aus). Wenn /s/-Writes
-#  hier wirken, kann HA das Dosing pre-Pump-Off softwareseitig stoppen
-#  (Spülphase mit aktiver Pumpe + Paddelschalter, ohne neue Chemie).
-#
-#  Die bestehenden binary_sensors (ph_state, chlor_automatic_on_off) bleiben
-#  parallel als read-only — neue Switch-Entities haben eigene unique_ids.
-# ---------------------------------------------------------------------------
-
-WRITABLE_SWITCHES = [
-    {
-        "register": "5.42",
-        "name": "pH Automatik Steuerung",
-        "unique_id": "ph_automatic_control",
-        "on_value": "19.17",
-        "off_value": "19.18",
-        "icon": "mdi:flask",
-    },
-    {
-        "register": "5.154",
-        "name": "Chlor Automatik Steuerung",
-        "unique_id": "chlor_automatic_control",
-        "on_value": "19.17",
-        "off_value": "19.18",
-        "icon": "mdi:test-tube",
-    },
-]
-
-
 def transform_value(sensor, raw_value):
     """Apply sensor-specific transformation to raw value."""
     transform = sensor.get("transform")

@@ -16,7 +16,7 @@ import paho.mqtt.client as mqtt
 
 from sensors import (
     SENSORS, BINARY_SENSORS,
-    WRITABLE_NUMBERS, WRITABLE_SELECTS, WRITABLE_SWITCHES,
+    WRITABLE_NUMBERS, WRITABLE_SELECTS,
     LOCAL_NUMBERS, DERIVED_SENSORS,
     transform_value, transform_select, evaluate_binary,
 )
@@ -84,12 +84,6 @@ class BayrolBridge:
         self._select_cmd_topics = {}
         for s in WRITABLE_SELECTS:
             self._select_cmd_topics[f"{TOPIC_PREFIX}/select/{s['unique_id']}/set"] = s
-        self._switch_cmd_topics = {}
-        for s in WRITABLE_SWITCHES:
-            self._switch_cmd_topics[f"{TOPIC_PREFIX}/switch/{s['unique_id']}/set"] = s
-        # Switches teilen Register mit binary_sensors — separate Map fürs
-        # State-Mirroring beim /v/-Read (kein Konflikt mit _sensor_by_register).
-        self._switches_by_register = {s["register"]: s for s in WRITABLE_SWITCHES}
 
         # --- Bayrol Cloud MQTT client (WSS) ---
         self._bayrol = mqtt.Client(
@@ -266,12 +260,6 @@ class BayrolBridge:
             state_topic = f"{TOPIC_PREFIX}/binary_sensor/{sensor['unique_id']}/state"
             self._local.publish(state_topic, "ON" if is_on else "OFF", retain=True)
             log.debug("Published %s = %s", sensor["name"], "ON" if is_on else "OFF")
-            # Switch-Companion mit-updaten (pH-Auto, Chlor-Auto)
-            switch = self._switches_by_register.get(register)
-            if switch:
-                switch_state = f"{TOPIC_PREFIX}/switch/{switch['unique_id']}/state"
-                self._local.publish(
-                    switch_state, "ON" if is_on else "OFF", retain=True)
             # Feed canister tracker
             ct_key = self._canister_binary_map.get(sensor["unique_id"])
             if ct_key:
@@ -365,8 +353,6 @@ class BayrolBridge:
                 client.subscribe(f"{TOPIC_PREFIX}/number/{s['unique_id']}/set")
             for s in WRITABLE_SELECTS:
                 client.subscribe(f"{TOPIC_PREFIX}/select/{s['unique_id']}/set")
-            for s in WRITABLE_SWITCHES:
-                client.subscribe(f"{TOPIC_PREFIX}/switch/{s['unique_id']}/set")
             # Local-only writable numbers (HA-side Pool-Config): SET commands +
             # state-topic-subscribe um retained user-values bei Restart wieder
             # in self._latest_values zu laden.
@@ -494,24 +480,6 @@ class BayrolBridge:
                         pass
             else:
                 log.warning("Invalid option for %s: %s", select_sensor["name"], payload)
-            return
-
-        # Writable switch entities (pH-Auto, Chlor-Auto — Test ob /s/ wirkt)
-        switch_sensor = self._switch_cmd_topics.get(topic)
-        if switch_sensor:
-            is_on = payload.upper() == "ON"
-            raw = switch_sensor["on_value"] if is_on else switch_sensor["off_value"]
-            # Bayrol erwartet v als JSON-Number (float) für Status-Codes wie
-            # 19.17/19.18 — analog zur Referenz-Integration die mqtt_value
-            # unquoted in den JSON-String einsetzt.
-            bayrol_value = float(raw)
-            self._write_to_bayrol(switch_sensor["register"], bayrol_value)
-            state_topic = f"{TOPIC_PREFIX}/switch/{switch_sensor['unique_id']}/state"
-            self._local.publish(
-                state_topic, "ON" if is_on else "OFF", retain=True)
-            log.info(
-                "Set %s = %s (MQTT: %s)",
-                switch_sensor["name"], payload, raw)
             return
 
         # --- Shelly integration ---
@@ -736,26 +704,13 @@ class BayrolBridge:
                 f"{DISCOVERY_PREFIX}/sensor/bayrol/{sensor['unique_id']}/config",
                 "", qos=1, retain=True)
 
-        # --- Writable switch entities (pH-Auto / Chlor-Auto Steuerung) ---
-        for sensor in WRITABLE_SWITCHES:
-            config = {
-                "name": sensor["name"],
-                "unique_id": f"bayrol_{sensor['unique_id']}",
-                "state_topic": f"{TOPIC_PREFIX}/switch/{sensor['unique_id']}/state",
-                "command_topic": f"{TOPIC_PREFIX}/switch/{sensor['unique_id']}/set",
-                "payload_on": "ON",
-                "payload_off": "OFF",
-                "state_on": "ON",
-                "state_off": "OFF",
-                "device": device_info,
-                "availability_topic": f"{TOPIC_PREFIX}/availability",
-                "payload_available": "online",
-                "payload_not_available": "offline",
-            }
-            if "icon" in sensor:
-                config["icon"] = sensor["icon"]
-            topic = f"{DISCOVERY_PREFIX}/switch/bayrol/{sensor['unique_id']}/config"
-            self._local.publish(topic, json.dumps(config), qos=1, retain=True)
+        # --- Migration cleanup: ehemalige Switches aus v0.15.6 entfernen ---
+        # (Source-Steuerung pH-Auto/Chlor-Auto via MQTT war Proof-of-Concept,
+        # in v0.15.7 wieder zurückgebaut. Empty-Payload löscht HA-Entity.)
+        for legacy_uid in ("ph_automatic_control", "chlor_automatic_control"):
+            self._local.publish(
+                f"{DISCOVERY_PREFIX}/switch/bayrol/{legacy_uid}/config",
+                "", qos=1, retain=True)
 
         # --- Shelly power entities (if configured) ---
         if self._shelly_prefix:
